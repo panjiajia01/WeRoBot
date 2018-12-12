@@ -5,7 +5,7 @@ import requests
 from six.moves import urllib
 
 from requests.compat import json as _json
-from werobot.utils import to_text
+from werobot.utils import to_text, acquire_lock_with_timeout, release_lock
 from werobot.replies import Article
 
 
@@ -41,6 +41,10 @@ class Client(object):
     @property
     def appsecret(self):
         return self.config.get("APP_SECRET", None)
+
+    @property
+    def redis(self):
+        return self.config.get("REDIS_CLIENT", None)
 
     @staticmethod
     def _url_encode_files(file):
@@ -95,21 +99,23 @@ class Client(object):
         )
 
     def get_access_token(self):
-        """
-        判断现有的token是否过期。
-        用户需要多进程或者多机部署可以手动重写这个函数
-        来自定义token的存储，刷新策略。
-
-        :return: 返回token
-        """
-        if self._token:
-            now = time.time()
-            if self.token_expires_at - now > 60:
-                return self._token
-        json = self.grant_token()
-        self._token = json["access_token"]
-        self.token_expires_at = int(time.time()) + json["expires_in"]
-        return self._token
+        redis_prefix = self.config.get('REDIS_PREFIX', '')
+        token_key = f'{redis_prefix}_access_token'
+        token = self.redis.get(token_key)
+        ttl = self.redis.ttl(token_key)
+        if not token or ttl < 60:
+            identifier = acquire_lock_with_timeout(self.redis, token_key)
+            ttl = self.redis.ttl(token_key)
+            if not ttl or ttl < 60:
+                token_json = self.grant_token()
+                token = token_json['access_token']
+                exp = token_json['expires_in']
+                self.redis.set(token_key, token, ex=exp)
+                release_lock(self.redis, token_key, identifier)
+            else:
+                token = self.redis.get(token_key)
+                return token
+        return token
 
     @property
     def token(self):

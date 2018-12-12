@@ -8,6 +8,9 @@ import random
 import re
 import string
 import time
+import redis
+import math
+import uuid
 from functools import wraps
 from hashlib import sha1
 
@@ -153,3 +156,37 @@ def make_error_page(url):
 
 def is_regex(value):
     return isinstance(value, re_type)
+
+
+# redis 加锁
+def acquire_lock_with_timeout(conn: redis.StrictRedis, lockname, acquire_timeout=10, lock_timeout=10):
+    identifier = str(uuid.uuid4())
+    lockname = f'lock:{lockname}'
+    lock_timeout = int(math.ceil(lock_timeout))
+    end = time.time() + acquire_timeout
+    while time.time() < end:
+        if conn.set(lockname, identifier, ex=lock_timeout, nx=True):
+            return identifier
+        elif not conn.ttl(lockname):
+            conn.expire(lockname, lock_timeout)
+    return False
+
+
+# redis 释放锁
+def release_lock(conn: redis.StrictRedis, lockname, identifier):
+    pipe = conn.pipeline(True)
+    lockname = f'lock:{lockname}'
+    while True:
+        try:
+            pipe.watch(lockname)
+            if pipe.get(lockname) == identifier:
+                pipe.multi()
+                pipe.delete(lockname)
+                pipe.execute()
+                return True
+            pipe.unwatch()
+            break
+        except redis.exceptions.WatchError:
+            pass
+    return False
+
